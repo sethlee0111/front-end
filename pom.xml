@@ -279,6 +279,21 @@
         </dependencies>
       </plugin>
 
+      <!-- join graph analytics tools-->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifest>
+              <addClasspath>true</addClasspath>
+              <classpathPrefix>join_graph_analytics/</classpathPrefix>
+              <mainClass>org.opencypher.v9_0.frontend.join_graph_analytics.Hypergraph</mainClass>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+
 
     </plugins>
   </build>

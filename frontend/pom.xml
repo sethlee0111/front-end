@@ -14,16 +14,7 @@
   <name>openCypher Front End</name>
 
   <description>
-    Scala implementation of
-      - parser
-      - abstract syntax tree (AST)
-      - semantic analysis
-      - typing
-      - scoping
-
-    for openCypher queries, resulting in a normalised AST representation of the query string.
-
-    See https://www.opencypher.org for more information on the openCypher project and query language.
+    Join Graph Analytics
   </description>
 
   <scm>
@@ -110,7 +101,7 @@
       <groupId>org.opencypher</groupId>
       <artifactId>opencypher-cypher-ast-factory-9.0_${scala.binary.version}</artifactId>
       <version>${project.version}</version>
-      <scope>test</scope>
+      <scope>main, test</scope>
     </dependency>
 
     <!-- scala -->
@@ -158,5 +149,6 @@
     </dependency>
 
   </dependencies>
+
 
 </project>

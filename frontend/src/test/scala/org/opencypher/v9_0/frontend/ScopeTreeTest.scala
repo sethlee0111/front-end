@@ -15,7 +15,7 @@
  */
 package org.opencypher.v9_0.frontend
 
-import org.opencypher.v9_0.ast.Statement
+import org.opencypher.v9_0.ast.{Match, Query, SingleQuery, Statement}
 import org.opencypher.v9_0.ast.StatementHelper.RichStatement
 import org.opencypher.v9_0.ast.factory.neo4j.JavaCCParser
 import org.opencypher.v9_0.ast.semantics.ScopeTestHelper.intCollectionCollectionSymbol
@@ -25,12 +25,15 @@ import org.opencypher.v9_0.ast.semantics.ScopeTestHelper.nodeSymbol
 import org.opencypher.v9_0.ast.semantics.ScopeTestHelper.pathCollectionSymbol
 import org.opencypher.v9_0.ast.semantics.ScopeTestHelper.scope
 import org.opencypher.v9_0.ast.semantics.ScopeTestHelper.typedSymbol
+import org.opencypher.v9_0.expressions.{LabelName, NodePattern, RelTypeName, RelationshipChain, RelationshipPattern, Variable}
 import org.opencypher.v9_0.frontend.phases.Namespacer
-import org.opencypher.v9_0.util.AnonymousVariableNameGenerator
-import org.opencypher.v9_0.util.OpenCypherExceptionFactory
-import org.opencypher.v9_0.util.Ref
+import org.opencypher.v9_0.util.{ASTNode, AnonymousVariableNameGenerator, OpenCypherExceptionFactory, Ref}
+import org.opencypher.v9_0.util.Foldable.TreeAny
 import org.opencypher.v9_0.util.symbols.StorableType
 import org.opencypher.v9_0.util.test_helpers.CypherFunSuite
+
+import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 
 /**
  * ScopeTree is tested here because we want to be able to use the parser for the testing
@@ -317,10 +320,214 @@ class ScopeTreeTest extends CypherFunSuite {
       )
     )
   }
+  /* My Tests */
+  test("just a random test") {
+    val ast = parse("MATCH (:Tag)<-[:HAS_TAG]-(message:Message)-[:HAS_CREATOR]-(creator:Person)\nOPTIONAL MATCH (message)<-[:LIKES]-(liker:Person)\nOPTIONAL MATCH (message)<-[:REPLY_OF]-(comment:Comment)\nRETURN count(*) AS count")
+    println(ast)
+    val lst = ListBuffer.empty[join_graph_analytics.RelationEdge]
+    for (mch <- getMatchList(ast)) {
+      getRelationEdges(mch.treeChildren, lst)
+    }
+    println(lst)
+    println(getHypergraphFromRelationEdges(lst))
+  }
+
+//MATCH (person1:Person)-[:IS_LOCATED_IN]->(city1:City)-[:IS_PART_OF]->(country), (person2:Person)-[:IS_LOCATED_IN]->(city2:City)-[:IS_PART_OF]->(country)
+  test("get Match Clause Test") {
+    val ast = parse("MATCH (person1)-[:KNOWS]-(person2)-[:KNOWS]-(person3)-[:KNOWS]-(person1)")
+    val mList = new ListBuffer[Match]
+    getMatchList(ast.treeChildren.next().asInstanceOf[ASTNode], mList)
+    println(mList)
+  }
+
+  test("join tree construct test") {
+    constructJoinTree("MATCH (person1)-[:KNOWS]-(person2)-[:KNOWS]-(person3)-[:KNOWS]-(person1)")
+  }
+  //// my functions
+  // @TODO fix this so that it can be used with other clauses
+  def getMatchList(ast: Statement): ListBuffer[Match] = {
+    val res = ListBuffer.empty[Match]
+    val children = ast.treeChildren.next().treeChildren.next().treeChildren
+    while (children.hasNext) {
+      val child = children.next()
+      child match {
+        case mch : Match => res += mch
+        case _ => {}
+      }
+    }
+    res
+  }
+
+  def getMatchList(ast: ASTNode, mList: ListBuffer[Match]): Unit = {
+    ast match {
+      case mch: Match => mList.addOne(mch)
+      case _ => {
+        val children = ast.treeChildren
+        while (children.hasNext) getMatchList(children.next.asInstanceOf[ASTNode], mList)
+      }
+    }
+  }
+
+  def getRelationshipChainsFromMatch(mch : Match) : ListBuffer[RelationshipChain] = {
+    var res = ListBuffer.empty[RelationshipChain]
+    for (everyPath <- mch.pattern.patternParts)
+      res += everyPath.element.asInstanceOf[RelationshipChain]
+    res
+  }
+
+  def getRelationEdges(it : Iterator[AnyRef], res: ListBuffer[join_graph_analytics.RelationEdge]): join_graph_analytics.VariableVertex = {
+    var vv = new join_graph_analytics.VariableVertex("", "")
+    while (it.hasNext) {
+      val node = it.next
+      node match {
+        case chain: RelationshipChain =>
+          vv = getRelationEdgesFromRelationshipChain(chain, res)
+        case _ =>
+          vv = getRelationEdges(node.treeChildren, res)
+      }
+    }
+    vv
+  }
+
+  def getRelationEdgesFromRelationshipChain(rc: RelationshipChain, res: ListBuffer[join_graph_analytics.RelationEdge]): join_graph_analytics.VariableVertex = {
+    // assumes that RelationshipChain is always between two labels
+    // last: last variable vertex read, which will be connected to new relationshipPattern (relation)
+    val children = rc.treeChildren
+    var vv = new join_graph_analytics.VariableVertex("", "")
+    var re = new join_graph_analytics.RelationEdge("")
+    while (children.hasNext) {
+      val node = children.next()
+      node match {
+        case chain: RelationshipChain =>
+          vv = getRelationEdgesFromRelationshipChain(chain, res)
+        case nodePattern: NodePattern =>
+          vv = getVariableVertexFromNodePattern(nodePattern)
+          if (re.relationName.nonEmpty) {
+            re.vertices.addOne(vv)
+            res.addOne(re)
+          }
+        case relPattern : RelationshipPattern =>
+          re = getRelationEdgeFromRelationshipPattern(relPattern)
+          if (!vv.empty) re.vertices.addOne(vv)
+      }
+    }
+    vv
+  }
+
+  def getHypergraphFromRelationEdges(lst: ListBuffer[join_graph_analytics.RelationEdge]): mutable.HashMap[String, ListBuffer[String]] = {
+    val edgeMap = new mutable.HashMap[String, String]()
+    val vertexMap = new mutable.HashMap[String, String]()
+    val graph = new mutable.HashMap[String, ListBuffer[String]]()
+    //  identify all unique variables. Variables with only label name is identified as unique vertices
+    // as they do not need to be joined with others
+    var num_vertex = 0
+    lst.foreach(re => {
+      val relationName = re.relationName
+      var edgeName : String = "E"
+      if (edgeMap.contains(relationName)) edgeName =  edgeMap(relationName)
+      else {
+        edgeName = "E" + new String(edgeMap.size.toString())
+        edgeMap += (relationName -> edgeName)
+        graph += (edgeName -> new ListBuffer[String])
+      }
+      re.vertices.foreach(vv => {
+        var vertexName : String = "V"
+        if (vv.variableName.nonEmpty) {
+          if (vertexMap.contains(vv.variableName)) vertexName = vertexMap(vv.variableName)
+          else {
+            vertexName = "V" + new String(num_vertex.toString())
+            num_vertex += 1
+            vertexMap += (vv.variableName -> vertexName)
+          }
+        }
+        else {
+          vertexName = "V" + new String(num_vertex.toString())
+          num_vertex +=1
+        }
+        graph(edgeName).addOne(vertexName)
+      })
+    })
+    graph
+  }
+
+  def getVariableVertexFromNodePattern(np : NodePattern): join_graph_analytics.VariableVertex = {
+    // @WARNING: This assumes only a specific construction of NodePattern
+    // @TODO: take account of the case where either one of variablename or labelname does not exist
+    val nodeChildren = np.treeChildren
+    var variableName : String = ""
+    var labelName : String = ""
+    try {
+      variableName = nodeChildren.next().treeChildren.next().asInstanceOf[Variable].name
+    } catch {
+      // no variable name
+      case _ => {}
+    }
+    try {
+      labelName = nodeChildren.next().treeChildren.next().treeChildren.next().asInstanceOf[LabelName].name
+    } catch {
+      // no label name
+      case _ => {}
+    }
+    new join_graph_analytics.VariableVertex(_variableName = variableName, _labelName = labelName)
+  }
+
+  def getRelationEdgeFromRelationshipPattern(rp: RelationshipPattern): join_graph_analytics.RelationEdge = {
+    val relTypeName = rp.treeChildren.drop(1).next().treeChildren.next()
+    new join_graph_analytics.RelationEdge(relTypeName.asInstanceOf[RelTypeName].name)
+  }
+
+  def constructJoinTree(queryText: String): String = {
+    val statement = JavaCCParser.parse(queryText, OpenCypherExceptionFactory(None), new AnonymousVariableNameGenerator)
+    val statementRewrite = statement.endoRewrite(Namespacer.projectUnions)
+    val matchStatements = getMatchStatements(statementRewrite)
+    for (st <- matchStatements)
+      println(st)
+    ""
+  }
+
+  def getMatchStatements(st: Statement): ListBuffer[Match] = {
+    // @TODO: currently, this only works when Match clauses are wrapped with Query, SingleQuery, and List
+    val res = ListBuffer.empty[Match]
+    val matchList = st.returnColumns
+    val children = st.treeChildren
+    while (children.hasNext) {
+      val child = children.next()
+      println(child)
+      if (child.isInstanceOf[SingleQuery]) {
+        println("in")
+      }
+    }
+    res
+  }
+
+  /////////
 
   def parse(queryText: String): Statement = {
     val statement = JavaCCParser.parse(queryText, OpenCypherExceptionFactory(None), new AnonymousVariableNameGenerator)
     // We have to project unions to materialize the UnionMappings so that we can find the Variables in them.
     statement.endoRewrite(Namespacer.projectUnions)
+  }
+}
+
+class RelationEdge(_relationName: String) {
+  def relationName : String = _relationName
+  var vertices : ListBuffer[join_graph_analytics.VariableVertex] = ListBuffer.empty[join_graph_analytics.VariableVertex]
+  override def toString = {
+    var res : String = "[[RelationEdge] " + relationName
+    vertices.foreach(res += " | " + _.toString)
+    res += "]"
+    res
+  }
+}
+
+class VariableVertex(_variableName: String, _labelName: String) {
+  def variableName : String = _variableName
+  def labelName : String= _labelName
+  override def toString = {
+//    "[VariableVertex] variable: " + variableName + ", label: " + labelName
+    "" + variableName + "#" + labelName
+  }
+  def empty : Boolean = {
+    variableName.isEmpty && labelName.isEmpty
   }
 }
